@@ -1,5 +1,7 @@
 # LLM Wiki Zotero Import Plugin
 
+[中文说明 / Chinese README](README_CN.md)
+
 This repository contains a small Zotero import plugin/overlay for [nashsu/llm_wiki](https://github.com/nashsu/llm_wiki). It adds a Zotero button to the LLM Wiki Sources view so local Zotero PDFs, Markdown attachments, and Zotero notes can be copied into `raw/sources/zotero/` and queued for the normal LLM Wiki ingest flow.
 
 The code is packaged as an overlay rather than a fork of the full project. Only the Zotero-specific files, integration patch, and usage documentation are included.
