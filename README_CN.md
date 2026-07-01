@@ -233,6 +233,38 @@ cargo test --manifest-path src-tauri\Cargo.toml zotero
 
 其中真实连接 Zotero / Better BibTeX 的 Rust 测试默认标记为 ignored，因为它需要本机正在运行 Zotero。
 
+## 发布多平台版本
+
+本仓库包含 GitHub Actions 工作流：
+
+```text
+.github/workflows/build-llm-wiki-zotero.yml
+```
+
+它会在 GitHub runner 中自动完成这些步骤：
+
+1. 拉取本仓库的 Zotero 插件覆盖包。
+2. 拉取 `nashsu/llm_wiki` 的指定版本，默认是 `v0.5.4`。
+3. 把 `plugin-files/` 覆盖到 LLM Wiki 源码中。
+4. 应用 `patches/llm-wiki-zotero-integration.patch`。
+5. 在 Windows、Linux、macOS x64、macOS arm64 上构建 Tauri 包。
+6. tag 发布时，把构建产物上传到 GitHub Release。
+
+手动测试多平台构建：
+
+```text
+GitHub 仓库页面 -> Actions -> Build LLM Wiki Zotero Release -> Run workflow
+```
+
+正式发布：
+
+```bash
+git tag v0.5.4-zotero.1
+git push origin v0.5.4-zotero.1
+```
+
+推送 `v*` tag 后，Actions 会自动创建 release，并附加 Windows、macOS、Linux 的安装包或便携包。
+
 ## 常见问题
 
 ### 点击 Zotero 后提示无法连接 Better BibTeX
