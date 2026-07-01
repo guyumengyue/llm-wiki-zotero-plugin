@@ -1,0 +1,226 @@
+name: Build LLM Wiki Zotero Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      llm_wiki_ref:
+        description: "nashsu/llm_wiki ref to build from"
+        required: true
+        default: "v0.5.4"
+
+permissions:
+  contents: write
+
+env:
+  LLM_WIKI_REF: ${{ github.event.inputs.llm_wiki_ref || 'v0.5.4' }}
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_NET_RETRY: "5"
+  CARGO_HTTP_TIMEOUT: "60"
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+            args: ""
+            rust_target: ""
+            pdfium_source: ""
+            pdfium_target: ""
+          - name: linux-x64
+            os: ubuntu-22.04
+            args: ""
+            rust_target: ""
+            pdfium_source: ""
+            pdfium_target: ""
+          - name: macos-x64
+            os: macos-13
+            args: "--target x86_64-apple-darwin"
+            rust_target: "x86_64-apple-darwin"
+            pdfium_source: "src-tauri/pdfium/libpdfium-x86_64.dylib"
+            pdfium_target: "src-tauri/pdfium/libpdfium.dylib"
+          - name: macos-arm64
+            os: macos-latest
+            args: "--target aarch64-apple-darwin"
+            rust_target: "aarch64-apple-darwin"
+            pdfium_source: ""
+            pdfium_target: ""
+
+    steps:
+      - name: Checkout Zotero plugin overlay
+        uses: actions/checkout@v4
+        with:
+          path: plugin
+
+      - name: Checkout upstream LLM Wiki
+        uses: actions/checkout@v4
+        with:
+          repository: nashsu/llm_wiki
+          ref: ${{ env.LLM_WIKI_REF }}
+          path: llm_wiki
+
+      - name: Apply Zotero plugin overlay
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pluginRoot = Resolve-Path "plugin"
+          $appRoot = Resolve-Path "llm_wiki"
+
+          Get-ChildItem -Path (Join-Path $pluginRoot "plugin-files") -Recurse -File | ForEach-Object {
+            $relative = $_.FullName.Substring((Resolve-Path (Join-Path $pluginRoot "plugin-files")).Path.Length).TrimStart('\', '/')
+            $dest = Join-Path $appRoot $relative
+            New-Item -ItemType Directory -Force (Split-Path $dest -Parent) | Out-Null
+            Copy-Item $_.FullName $dest -Force
+          }
+
+          Push-Location $appRoot
+          try {
+            git apply (Join-Path $pluginRoot "patches/llm-wiki-zotero-integration.patch")
+          } finally {
+            Pop-Location
+          }
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: llm_wiki/src-tauri
+
+      - name: Install protoc (macOS)
+        if: startsWith(matrix.os, 'macos-')
+        run: brew install protobuf
+
+      - name: Install dependencies (Ubuntu)
+        if: startsWith(matrix.os, 'ubuntu-')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf protobuf-compiler xdg-utils
+
+      - name: Install protoc (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Swap PDFium binary
+        if: matrix.pdfium_source != ''
+        working-directory: llm_wiki
+        shell: bash
+        run: |
+          cp "${{ matrix.pdfium_source }}" "${{ matrix.pdfium_target }}"
+          ls -la src-tauri/pdfium
+
+      - name: Install frontend dependencies
+        working-directory: llm_wiki
+        run: npm install
+
+      - name: Prepare MCP server resources
+        working-directory: llm_wiki
+        run: |
+          npm --prefix mcp-server ci
+          npm run mcp:build
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: llm_wiki
+          tagName: ${{ (github.event_name == 'push' && github.ref_name) || (github.event_name == 'release' && github.event.release.tag_name) || '' }}
+          releaseName: ${{ (github.event_name == 'push' && format('LLM Wiki Zotero {0}', github.ref_name)) || (github.event_name == 'release' && github.event.release.name) || '' }}
+          releaseBody: |
+            Built from nashsu/llm_wiki `${{ env.LLM_WIKI_REF }}` with the Zotero import overlay from this repository.
+
+            The Zotero build adds local Zotero PDF, Markdown attachment, and note import into LLM Wiki Sources.
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}
+
+      - name: Package Windows portable zip
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        working-directory: llm_wiki
+        run: |
+          $version = node -p "require('./package.json').version"
+          .github/scripts/package-windows-portable.ps1 -Version "$version-zotero"
+
+      - name: Attach Windows portable zip to release
+        if: (github.event_name == 'push' || github.event_name == 'release') && matrix.os == 'windows-latest'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        working-directory: llm_wiki
+        run: |
+          $tag = if ("${{ github.event_name }}" -eq "release") { "${{ github.event.release.tag_name }}" } else { "${{ github.ref_name }}" }
+          gh release upload "$tag" dist-portable/*.zip --clobber
+
+      - name: Upload bundles as workflow artifacts
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.name }}
+          path: |
+            llm_wiki/src-tauri/target/**/release/bundle/msi/*.msi
+            llm_wiki/src-tauri/target/**/release/bundle/nsis/*.exe
+            llm_wiki/src-tauri/target/**/release/bundle/dmg/*.dmg
+            llm_wiki/src-tauri/target/**/release/bundle/deb/*.deb
+            llm_wiki/src-tauri/target/**/release/bundle/appimage/*.AppImage
+            llm_wiki/dist-portable/*.zip
+          if-no-files-found: warn
+          retention-days: 14
+
+  package-extension:
+    name: Package browser extension
+    needs: build
+    if: github.event_name == 'push' || github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout upstream LLM Wiki
+        uses: actions/checkout@v4
+        with:
+          repository: nashsu/llm_wiki
+          ref: ${{ env.LLM_WIKI_REF }}
+          path: llm_wiki
+
+      - name: Sync extension manifest version and zip
+        working-directory: llm_wiki
+        run: |
+          APP_VERSION=$(node -p "require('./package.json').version")
+          node -e "
+            const fs = require('fs');
+            const p = 'extension/manifest.json';
+            const m = JSON.parse(fs.readFileSync(p, 'utf-8'));
+            m.version = '${APP_VERSION}';
+            fs.writeFileSync(p, JSON.stringify(m, null, 2) + '\n');
+          "
+          mkdir -p dist-extension
+          (cd extension && zip -r "../dist-extension/llm-wiki-extension-${APP_VERSION}-zotero.zip" . -x "*.DS_Store")
+
+      - name: Attach extension zip to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: llm_wiki
+        run: |
+          TAG="${{ github.ref_name }}"
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          fi
+          gh release upload "$TAG" dist-extension/*.zip --clobber
