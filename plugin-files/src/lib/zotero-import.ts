@@ -677,7 +677,6 @@ async function cleanupZoteroMetadataMarkdown(
   for (const mdPath of seen) {
     try {
       const content = await readFile(mdPath)
-    if (head.includes("zotero_note_key:")) continue
       if (!isZoteroGeneratedMetadataMarkdown(content)) continue
       await deleteFile(mdPath)
       removed += 1
